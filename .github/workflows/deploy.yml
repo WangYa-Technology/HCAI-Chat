@@ -19,7 +19,6 @@ jobs:
       SERVICE_NAME: hcai-answer
       APP_DIR: /opt/hcai-answer
       WEB_DIR: /www/wwwroot/chat.hctopup.com
-      DATA_DIR: /var/lib/hcai-answer
 
     steps:
       - name: Checkout
@@ -49,7 +48,6 @@ jobs:
         run: |
           SHORT_SHA="${GITHUB_SHA::12}"
           echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
-          echo "RELEASE=release-${SHORT_SHA}" >> "$GITHUB_ENV"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -69,55 +67,76 @@ jobs:
 
       - name: Package release
         run: |
-          mkdir -p "deploy/${RELEASE}/app"
-          mkdir -p "deploy/${RELEASE}/ui"
+          mkdir -p deploy/app
+          mkdir -p deploy/ui
 
-          cp dist/answer "deploy/${RELEASE}/app/answer"
-          cp -R ui/build/. "deploy/${RELEASE}/ui/"
+          cp dist/answer deploy/app/answer
+          cp -R ui/build/. deploy/ui/
 
-          tar -C deploy -czf "release-${SHORT_SHA}.tar.gz" "${RELEASE}"
+          tar -C deploy -czf "release-${SHORT_SHA}.tar.gz" app ui
 
       - name: Upload release
         env:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
+          set -euo pipefail
+          test -n "$SSH_KEY" || (echo "DEPLOY_SSH_KEY is empty" && exit 1)
+          test -n "$DEPLOY_HOST" || (echo "DEPLOY_HOST is empty" && exit 1)
+          test -n "$DEPLOY_PORT" || (echo "DEPLOY_PORT is empty" && exit 1)
+          test -n "$DEPLOY_USER" || (echo "DEPLOY_USER is empty" && exit 1)
+
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -p "$DEPLOY_PORT" "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+          ssh-keyscan -T 10 -p "$DEPLOY_PORT" "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=20 \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "echo connected to \$(hostname)"
+
           scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=20 \
             "release-${SHORT_SHA}.tar.gz" \
             "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/${APP_NAME}-${SHORT_SHA}.tar.gz"
 
       - name: Activate release
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
+          set -euo pipefail
           ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=20 \
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "APP_DIR='${APP_DIR}' WEB_DIR='${WEB_DIR}' DATA_DIR='${DATA_DIR}' SERVICE_NAME='${SERVICE_NAME}' RELEASE='${RELEASE}' SHORT_SHA='${SHORT_SHA}' bash -s" <<'EOF'
+            "APP_DIR='${APP_DIR}' WEB_DIR='${WEB_DIR}' SERVICE_NAME='${SERVICE_NAME}' APP_NAME='${APP_NAME}' SHORT_SHA='${SHORT_SHA}' bash -s" <<'EOF'
           set -euo pipefail
 
-          sudo mkdir -p "${APP_DIR}/releases"
+          WORK_DIR="/tmp/${APP_NAME}-${SHORT_SHA}"
+          rm -rf "${WORK_DIR}"
+          mkdir -p "${WORK_DIR}"
+
           sudo mkdir -p "${WEB_DIR}"
-          sudo mkdir -p "${DATA_DIR}"
+          sudo mkdir -p "${APP_DIR}"
 
-          sudo tar -C "${APP_DIR}/releases" -xzf "/tmp/${SERVICE_NAME}-${SHORT_SHA}.tar.gz"
+          tar -C "${WORK_DIR}" -xzf "/tmp/${APP_NAME}-${SHORT_SHA}.tar.gz"
 
-          sudo ln -sfn "${APP_DIR}/releases/${RELEASE}/app" "${APP_DIR}/app"
-          sudo rsync -a --delete "${APP_DIR}/releases/${RELEASE}/ui/" "${WEB_DIR}/"
+          sudo install -m 755 "${WORK_DIR}/app/answer" "${APP_DIR}/answer"
+          sudo rsync -a --delete --exclude='.user.ini' "${WORK_DIR}/ui/" "${WEB_DIR}/"
 
-          sudo chmod +x "${APP_DIR}/app/answer"
+          if [ -L "${APP_DIR}/app" ]; then
+            sudo rm -f "${APP_DIR}/app"
+          fi
           sudo systemctl restart "${SERVICE_NAME}"
 
-          rm -f "/tmp/${SERVICE_NAME}-${SHORT_SHA}.tar.gz"
-
-          cd "${APP_DIR}/releases"
-          ls -1dt release-* | tail -n +6 | xargs -r sudo rm -rf
+          rm -rf "${WORK_DIR}"
+          rm -f "/tmp/${APP_NAME}-${SHORT_SHA}.tar.gz"
           EOF
