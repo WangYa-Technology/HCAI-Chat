@@ -41,3 +41,5 @@ deploy-package/
 .env
 
 /data
+answer-linux-amd64
+build/release/
