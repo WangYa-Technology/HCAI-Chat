@@ -1,0 +1,123 @@
+name: Deploy HCAI Answer
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      APP_NAME: hcai-answer
+      SERVICE_NAME: hcai-answer
+      APP_DIR: /opt/hcai-answer
+      WEB_DIR: /www/wwwroot/chat.hctopup.com
+      DATA_DIR: /var/lib/hcai-answer
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.1"
+          cache: true
+
+      - name: Test backend
+        run: go test ./...
+
+      - name: Build backend
+        run: |
+          mkdir -p dist
+          VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+          REVISION="$(git rev-parse --short HEAD)"
+          BUILD_TIME="$(date +%s)"
+          go build \
+            -ldflags="-X github.com/apache/answer/cmd.Version=${VERSION} -X github.com/apache/answer/cmd.Revision=${REVISION} -X github.com/apache/answer/cmd.Time=${BUILD_TIME}" \
+            -o dist/answer \
+            ./cmd/answer
+
+      - name: Set release name
+        run: |
+          SHORT_SHA="${GITHUB_SHA::12}"
+          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_ENV"
+          echo "RELEASE=release-${SHORT_SHA}" >> "$GITHUB_ENV"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.7.0 --activate
+
+      - name: Build frontend
+        working-directory: ui
+        run: |
+          pnpm pre-install
+          pnpm build
+
+      - name: Package release
+        run: |
+          mkdir -p "deploy/${RELEASE}/app"
+          mkdir -p "deploy/${RELEASE}/ui"
+
+          cp dist/answer "deploy/${RELEASE}/app/answer"
+          cp -R ui/build/. "deploy/${RELEASE}/ui/"
+
+          tar -C deploy -czf "release-${SHORT_SHA}.tar.gz" "${RELEASE}"
+
+      - name: Upload release
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$DEPLOY_PORT" "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+          scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" \
+            "release-${SHORT_SHA}.tar.gz" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/${APP_NAME}-${SHORT_SHA}.tar.gz"
+
+      - name: Activate release
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "APP_DIR='${APP_DIR}' WEB_DIR='${WEB_DIR}' DATA_DIR='${DATA_DIR}' SERVICE_NAME='${SERVICE_NAME}' RELEASE='${RELEASE}' SHORT_SHA='${SHORT_SHA}' bash -s" <<'EOF'
+          set -euo pipefail
+
+          sudo mkdir -p "${APP_DIR}/releases"
+          sudo mkdir -p "${WEB_DIR}"
+          sudo mkdir -p "${DATA_DIR}"
+
+          sudo tar -C "${APP_DIR}/releases" -xzf "/tmp/${SERVICE_NAME}-${SHORT_SHA}.tar.gz"
+
+          sudo ln -sfn "${APP_DIR}/releases/${RELEASE}/app" "${APP_DIR}/app"
+          sudo rsync -a --delete "${APP_DIR}/releases/${RELEASE}/ui/" "${WEB_DIR}/"
+
+          sudo chmod +x "${APP_DIR}/app/answer"
+          sudo systemctl restart "${SERVICE_NAME}"
+
+          rm -f "/tmp/${SERVICE_NAME}-${SHORT_SHA}.tar.gz"
+
+          cd "${APP_DIR}/releases"
+          ls -1dt release-* | tail -n +6 | xargs -r sudo rm -rf
+          EOF
