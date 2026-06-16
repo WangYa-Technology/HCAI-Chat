@@ -122,6 +122,13 @@ const thumbnailCache = new Map<
     thumbnailVersion?: number;
   }
 >();
+
+type LoadSystemImageGenerationsOptions = {
+  silent?: boolean;
+};
+
+let systemImageGenerationsLoadPromise: Promise<void> | null = null;
+let systemImageGenerationsShouldToastOnError = false;
 const thumbnailBackfillIds = new Map<string, 'visible' | 'background'>();
 const thumbnailBackfillRunningIds = new Set<string>();
 const thumbnailSubscribers = new Map<
@@ -1296,7 +1303,9 @@ interface AppState {
   selectedSystemImageModelId: string;
   setSelectedSystemImageModelId: (id: string) => void;
   loadSystemImageModels: () => Promise<void>;
-  loadSystemImageGenerations: () => Promise<void>;
+  loadSystemImageGenerations: (
+    options?: LoadSystemImageGenerationsOptions,
+  ) => Promise<void>;
   dismissedCodexCliPrompts: string[];
   dismissCodexCliPrompt: (key: string) => void;
 
@@ -1983,122 +1992,58 @@ export const useStore = create<AppState>()(
         })();
         return systemImageModelsLoadPromise;
       },
-      loadSystemImageGenerations: async () => {
-        try {
-          const generations = (await getAiImageGenerations()) || [];
+      loadSystemImageGenerations: async (options) => {
+        if (!options?.silent) systemImageGenerationsShouldToastOnError = true;
+        if (systemImageGenerationsLoadPromise)
+          return systemImageGenerationsLoadPromise;
 
-          const historyTasks = await Promise.all(
-            generations
-              .filter(
-                (generation) =>
-                  !hiddenSystemGenerationIds.has(generation.generation_id),
-              )
-              .map(mapSystemImageGenerationToTask),
-          );
-          const historyTaskIds = new Set(
-            historyTasks.map(getHistoryTaskMergeKey),
-          );
-          const historyTaskRawImageUrlKeys = new Set(
-            historyTasks.map(getTaskRawImageUrlKey).filter(Boolean),
-          );
+        systemImageGenerationsLoadPromise = (async () => {
+          try {
+            const generations = (await getAiImageGenerations()) || [];
 
-          useStore.setState((state) => {
-            const previousById = new Map(
-              state.tasks.map((task) => [task.id, task]),
-            );
-            const previousByGenerationId = new Map(
-              state.tasks
-                .filter((task) => task.systemGenerationId)
-                .map((task) => [task.systemGenerationId!, task]),
-            );
-            const previousByRawImageUrlKey = new Map(
-              state.tasks
-                .map((task) => [getTaskRawImageUrlKey(task), task] as const)
-                .filter(([key]) => Boolean(key)),
-            );
-            const previousByFingerprint = new Map(
-              state.tasks
-                .map((task) => [getTaskHistoryFingerprint(task), task] as const)
-                .filter(([key]) => Boolean(key)),
-            );
-            const mergedHistoryTasks = historyTasks.map((task) => {
-              const rawImageUrlKey = getTaskRawImageUrlKey(task);
-              const fingerprint = getTaskHistoryFingerprint(task);
-              const matchingLocalRunningTask = state.tasks.find((localTask) =>
-                isLikelySameRunningGalleryTask(localTask, task),
-              );
-              const previous =
-                previousById.get(task.id) ||
-                previousByGenerationId.get(getHistoryTaskMergeKey(task)) ||
-                (rawImageUrlKey
-                  ? previousByRawImageUrlKey.get(rawImageUrlKey)
-                  : undefined) ||
-                (fingerprint
-                  ? previousByFingerprint.get(fingerprint)
-                  : undefined) ||
-                matchingLocalRunningTask;
-              return previous
-                ? {
-                    ...task,
-                    id: previous.id,
-                    outputImages: previous.outputImages?.length
-                      ? previous.outputImages
-                      : task.outputImages,
-                    streamPartialImageIds: previous.streamPartialImageIds,
-                    streamPartialImageUrls:
-                      task.streamPartialImageUrls ??
-                      previous.streamPartialImageUrls,
-                    systemGenerationId:
-                      task.systemGenerationId ?? previous.systemGenerationId,
-                    isFavorite: previous.isFavorite,
-                    favoriteCollectionIds: previous.favoriteCollectionIds,
-                  }
-                : task;
-            });
-            const shouldKeepAllLocalGalleryTasks = historyTasks.length === 0;
-            const localTasks = state.tasks.filter((task) => {
-              const isGalleryTask =
-                (task.sourceMode ?? 'gallery') === 'gallery';
-              return (
-                (shouldKeepLocalTask(task) ||
-                  (shouldKeepAllLocalGalleryTasks && isGalleryTask)) &&
-                !historyTaskIds.has(getHistoryTaskMergeKey(task)) &&
-                !historyTaskRawImageUrlKeys.has(getTaskRawImageUrlKey(task)) &&
-                !historyTasks.some((historyTask) =>
-                  isLikelySameRunningGalleryTask(task, historyTask),
-                ) &&
-                !historyTasks.some(
-                  (historyTask) =>
-                    Boolean(getTaskHistoryFingerprint(historyTask)) &&
-                    getTaskHistoryFingerprint(historyTask) ===
-                      getTaskHistoryFingerprint(task),
-                )
-              );
-            });
-            const localTaskIds = new Set(localTasks.map((task) => task.id));
-            void Promise.allSettled(
-              state.tasks
+            const historyTasks = await Promise.all(
+              generations
                 .filter(
-                  (task) =>
-                    (task.sourceMode ?? 'gallery') === 'gallery' &&
-                    (!shouldKeepLocalTask(task) || !localTaskIds.has(task.id)),
+                  (generation) =>
+                    !hiddenSystemGenerationIds.has(generation.generation_id),
                 )
-                .map((task) => dbDeleteTask(task.id)),
+                .map(mapSystemImageGenerationToTask),
             );
-            return {
-              tasks: [...mergedHistoryTasks, ...localTasks].sort(
-                (a, b) => b.createdAt - a.createdAt,
-              ),
-            };
-          });
-        } catch (err) {
-          useStore
-            .getState()
-            .showToast(
-              err instanceof Error ? err.message : '图片历史加载失败',
-              'error',
-            );
-        }
+
+            useStore.setState((state) => {
+              const tasks = mergeHistoryAndLocalTasks(
+                historyTasks,
+                state.tasks,
+              );
+              const keptTaskIds = new Set(tasks.map((task) => task.id));
+              void Promise.allSettled(
+                state.tasks
+                  .filter(
+                    (task) =>
+                      (task.sourceMode ?? 'gallery') === 'gallery' &&
+                      !keptTaskIds.has(task.id),
+                  )
+                  .map((task) => dbDeleteTask(task.id)),
+              );
+              return { tasks };
+            });
+          } catch (err) {
+            if (!systemImageGenerationsShouldToastOnError) {
+              console.warn('图片历史刷新失败:', err);
+              return;
+            }
+            useStore
+              .getState()
+              .showToast(
+                err instanceof Error ? err.message : '图片历史加载失败',
+                'error',
+              );
+          } finally {
+            systemImageGenerationsLoadPromise = null;
+            systemImageGenerationsShouldToastOnError = false;
+          }
+        })();
+        return systemImageGenerationsLoadPromise;
       },
 
       // Input
@@ -2785,6 +2730,85 @@ function shouldKeepLocalTask(task: TaskRecord): boolean {
   );
 }
 
+function mergeHistoryAndLocalTasks(
+  historyTasks: TaskRecord[],
+  currentTasks: TaskRecord[],
+): TaskRecord[] {
+  const historyTaskIds = new Set(historyTasks.map(getHistoryTaskMergeKey));
+  const historyTaskRawImageUrlKeys = new Set(
+    historyTasks.map(getTaskRawImageUrlKey).filter(Boolean),
+  );
+  const previousById = new Map(currentTasks.map((task) => [task.id, task]));
+  const previousByGenerationId = new Map(
+    currentTasks
+      .filter((task) => task.systemGenerationId)
+      .map((task) => [task.systemGenerationId!, task]),
+  );
+  const previousByRawImageUrlKey = new Map(
+    currentTasks
+      .map((task) => [getTaskRawImageUrlKey(task), task] as const)
+      .filter(([key]) => Boolean(key)),
+  );
+  const previousByFingerprint = new Map(
+    currentTasks
+      .map((task) => [getTaskHistoryFingerprint(task), task] as const)
+      .filter(([key]) => Boolean(key)),
+  );
+  const mergedHistoryTasks = historyTasks.map((task) => {
+    const rawImageUrlKey = getTaskRawImageUrlKey(task);
+    const fingerprint = getTaskHistoryFingerprint(task);
+    const matchingLocalRunningTask = currentTasks.find((localTask) =>
+      isLikelySameRunningGalleryTask(localTask, task),
+    );
+    const previous =
+      previousById.get(task.id) ||
+      previousByGenerationId.get(getHistoryTaskMergeKey(task)) ||
+      (rawImageUrlKey
+        ? previousByRawImageUrlKey.get(rawImageUrlKey)
+        : undefined) ||
+      (fingerprint ? previousByFingerprint.get(fingerprint) : undefined) ||
+      matchingLocalRunningTask;
+    return previous
+      ? {
+          ...task,
+          id: previous.id,
+          outputImages: previous.outputImages?.length
+            ? previous.outputImages
+            : task.outputImages,
+          streamPartialImageIds: previous.streamPartialImageIds,
+          streamPartialImageUrls:
+            task.streamPartialImageUrls ?? previous.streamPartialImageUrls,
+          systemGenerationId:
+            task.systemGenerationId ?? previous.systemGenerationId,
+          isFavorite: previous.isFavorite,
+          favoriteCollectionIds: previous.favoriteCollectionIds,
+        }
+      : task;
+  });
+  const shouldKeepAllLocalGalleryTasks = historyTasks.length === 0;
+  const localTasks = currentTasks.filter((task) => {
+    const isGalleryTask = (task.sourceMode ?? 'gallery') === 'gallery';
+    return (
+      (shouldKeepLocalTask(task) ||
+        (shouldKeepAllLocalGalleryTasks && isGalleryTask)) &&
+      !historyTaskIds.has(getHistoryTaskMergeKey(task)) &&
+      !historyTaskRawImageUrlKeys.has(getTaskRawImageUrlKey(task)) &&
+      !historyTasks.some((historyTask) =>
+        isLikelySameRunningGalleryTask(task, historyTask),
+      ) &&
+      !historyTasks.some(
+        (historyTask) =>
+          Boolean(getTaskHistoryFingerprint(historyTask)) &&
+          getTaskHistoryFingerprint(historyTask) ===
+            getTaskHistoryFingerprint(task),
+      )
+    );
+  });
+  return [...mergedHistoryTasks, ...localTasks].sort(
+    (a, b) => b.createdAt - a.createdAt,
+  );
+}
+
 function isStaleLocalGalleryTask(task: TaskRecord): boolean {
   if ((task.sourceMode ?? 'gallery') !== 'gallery') return false;
   if (task.status === 'error') return true;
@@ -3350,7 +3374,7 @@ async function recoverCustomTask(taskId: string) {
   }
 }
 
-/** 初始化：恢复设置、输入草稿和 Agent 对话；画廊任务列表只从后端加载。 */
+/** 初始化：恢复设置、输入草稿、Agent 对话和本地画廊任务。 */
 export async function initStore() {
   const legacyAgentConversations = normalizeAgentConversations(
     useStore.getState().agentConversations,
@@ -3461,7 +3485,7 @@ export async function initStore() {
     favoriteState.favoriteCollections,
     favoriteState.defaultFavoriteCollectionId,
   );
-  const tasks = normalizedFavorites.tasks;
+  const localGalleryTasksWithFavorites = normalizedFavorites.tasks;
   if (normalizedFavorites.collections !== favoriteState.favoriteCollections) {
     favoriteState.setFavoriteCollections(normalizedFavorites.collections);
   }
@@ -3475,7 +3499,12 @@ export async function initStore() {
         normalizedFavorites.defaultFavoriteCollectionId,
       );
   }
-  useStore.getState().setTasks(tasks);
+  useStore.setState((state) => ({
+    tasks: mergeHistoryAndLocalTasks(
+      state.tasks,
+      localGalleryTasksWithFavorites,
+    ),
+  }));
 
   // 收集所有任务引用的图片 id
   const referencedIds = new Set<string>();
@@ -3496,7 +3525,7 @@ export async function initStore() {
       for (const id of round.inputImageIds) referencedIds.add(id);
     }
   }
-  for (const t of tasks) {
+  for (const t of state.tasks) {
     addTaskReferencedImageIds(referencedIds, t);
   }
 
@@ -3640,7 +3669,6 @@ export async function initStore() {
         : {}),
     });
   }
-
 }
 
 /** 提交新任务 */
@@ -4446,7 +4474,9 @@ async function cacheTaskImageUrlsInBackground(
     if (nextOutputImages[outputIndex]) continue;
     nextOutputImages[outputIndex] = imgId;
   }
-  if (nextOutputImages.join('\n') === (latestTask.outputImages || []).join('\n'))
+  if (
+    nextOutputImages.join('\n') === (latestTask.outputImages || []).join('\n')
+  )
     return;
 
   updateTaskInStore(taskId, {
@@ -4961,11 +4991,7 @@ async function executeSystemImageTask(taskId: string) {
           (partial) => {
             useStore
               .getState()
-              .setTaskStreamPreview(
-                taskId,
-                partial.image,
-                partial.itemIndex,
-              );
+              .setTaskStreamPreview(taskId, partial.image, partial.itemIndex);
             void persistTaskStreamPartialImage(
               taskId,
               partial.image,
@@ -5046,7 +5072,7 @@ async function executeSystemImageTask(taskId: string) {
       `生成完成，共 ${Math.max(outputIds.length, responseImageUrls.length)} 张图片。`,
     );
     window.dispatchEvent(new CustomEvent('hcai-subscription-updated'));
-    void useStore.getState().loadSystemImageGenerations();
+    void useStore.getState().loadSystemImageGenerations({ silent: true });
   } catch (err) {
     useStore.getState().setTaskStreamPreview(taskId);
     const latestTask =
@@ -7472,7 +7498,10 @@ export async function retryTask(task: TaskRecord) {
       systemModel?.display_name ||
       task.apiModel ||
       '系统图片模型'
-    : task.apiProfileName || profileForParams?.name || task.apiModel || '未知配置';
+    : task.apiProfileName ||
+      profileForParams?.name ||
+      task.apiModel ||
+      '未知配置';
   const apiMode = isGalleryTask
     ? task.apiMode || systemModel?.api_mode || 'images'
     : task.apiMode || profileForParams?.apiMode || 'images';
@@ -7519,9 +7548,11 @@ export async function retryTask(task: TaskRecord) {
       : [newTask, ...latestTasks];
   useStore.getState().setTasks(nextTasks);
   if (taskIndex >= 0) {
-    useStore.getState().setSelectedTaskIds((ids) =>
-      ids.map((id) => (id === task.id ? newTask.id : id)),
-    );
+    useStore
+      .getState()
+      .setSelectedTaskIds((ids) =>
+        ids.map((id) => (id === task.id ? newTask.id : id)),
+      );
     await dbDeleteTask(task.id);
   }
   if ((task.sourceMode ?? 'gallery') === 'gallery') {

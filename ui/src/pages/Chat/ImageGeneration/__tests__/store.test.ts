@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AiImageModel } from '@/common/interface';
+import type { AiImageGeneration, AiImageModel } from '@/common/interface';
 import { DEFAULT_PARAMS } from '@/pages/Chat/ImageGeneration/types';
 import {
   createDefaultFalProfile,
@@ -29,6 +29,7 @@ import {
   callAgentResponsesApi,
   callBatchImageSingle,
 } from '@/pages/Chat/ImageGeneration/lib/agentApi';
+import { getAiImageGenerations } from '@/services';
 import {
   cleanStaleAgentInputDrafts,
   deleteAgentRoundFromConversation,
@@ -154,6 +155,20 @@ vi.mock('@/pages/Chat/ImageGeneration/lib/agentApi', () => ({
     }
   }),
 }));
+vi.mock('@/services', () => ({
+  deleteAiImageAgentConversation: vi.fn(async () => undefined),
+  deleteAiImageGeneration: vi.fn(async () => undefined),
+  generateAiImage: vi.fn(async () => ({
+    images: [],
+    image_urls: [],
+    generation_id: '',
+  })),
+  getAiImageAgentConversations: vi.fn(async () => []),
+  getAiImageGenerations: vi.fn(async () => []),
+  getAiImageModels: vi.fn(async () => []),
+  saveAiImageAgentConversation: vi.fn(async () => undefined),
+  saveAiImageAgentGeneration: vi.fn(async () => undefined),
+}));
 
 const imageA = { id: 'image-a', dataUrl: 'data:image/png;base64,a' };
 const imageB = { id: 'image-b', dataUrl: 'data:image/png;base64,b' };
@@ -227,6 +242,130 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
     ...overrides,
   };
 }
+
+function systemGeneration(
+  overrides: Partial<AiImageGeneration> = {},
+): AiImageGeneration {
+  return {
+    id: 1,
+    generation_id: 'generation-a',
+    user_id: 'user-a',
+    site_model_id: 'test-image-model',
+    provider_id: 1,
+    provider_name: 'test-provider',
+    provider_model_id: 'provider-image-model',
+    prompt: 'prompt',
+    negative_prompt: '',
+    aspect_ratio: '',
+    size: DEFAULT_PARAMS.size,
+    style: '',
+    quality: DEFAULT_PARAMS.quality,
+    output_format: DEFAULT_PARAMS.output_format,
+    output_compression: undefined,
+    moderation: DEFAULT_PARAMS.moderation,
+    count: 1,
+    image_urls: ['https://example.com/image-a.png'],
+    status: 'succeeded',
+    error: '',
+    expires_at: 0,
+    created_at: 1,
+    updated_at: 2,
+    ...overrides,
+  };
+}
+
+describe('system image generation loading', () => {
+  beforeEach(async () => {
+    await clearTasks();
+    await clearImages();
+    vi.mocked(getAiImageGenerations).mockReset();
+    vi.mocked(getAiImageGenerations).mockResolvedValue([]);
+    useStore.setState({
+      tasks: [],
+      favoriteCollections: [
+        {
+          id: 'favorite-a',
+          name: '收藏夹 A',
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      defaultFavoriteCollectionId: 'favorite-a',
+      inputImages: [],
+      galleryInputDraft: null,
+      agentConversations: [],
+      toast: null,
+      showToast: vi.fn(),
+    });
+  });
+
+  it('toasts a shared history load error if any caller is not silent', async () => {
+    let rejectLoad: (error: Error) => void = () => undefined;
+    vi.mocked(getAiImageGenerations).mockReturnValue(
+      new Promise((_, reject) => {
+        rejectLoad = reject;
+      }),
+    );
+
+    const silentLoad = useStore
+      .getState()
+      .loadSystemImageGenerations({ silent: true });
+    const visibleLoad = useStore.getState().loadSystemImageGenerations();
+    rejectLoad(new Error('history failed'));
+
+    await Promise.all([silentLoad, visibleLoad]);
+
+    expect(useStore.getState().showToast).toHaveBeenCalledWith(
+      'history failed',
+      'error',
+    );
+  });
+
+  it('keeps local favorite state when remote history resolves after local startup', async () => {
+    const localTask = task({
+      id: 'local-task',
+      prompt: 'same prompt',
+      outputImages: ['local-image'],
+      rawImageUrls: ['https://example.com/image-a.png'],
+      sourceMode: 'gallery',
+      isFavorite: true,
+      favoriteCollectionIds: ['favorite-a'],
+      createdAt: 1000,
+      finishedAt: 2000,
+    });
+    await putDbTask(localTask);
+    let resolveHistory: (generations: AiImageGeneration[]) => void =
+      () => undefined;
+    vi.mocked(getAiImageGenerations).mockReturnValue(
+      new Promise((resolve) => {
+        resolveHistory = resolve;
+      }),
+    );
+
+    const historyLoad = useStore.getState().loadSystemImageGenerations();
+    await initStore();
+    resolveHistory([
+      systemGeneration({
+        generation_id: 'remote-generation',
+        prompt: 'same prompt',
+        image_urls: ['https://example.com/image-a.png'],
+        created_at: 1,
+        updated_at: 2,
+      }),
+    ]);
+    await historyLoad;
+
+    const tasks = useStore.getState().tasks;
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({
+      id: 'local-task',
+      systemGenerationId: 'remote-generation',
+      outputImages: ['local-image'],
+      isFavorite: true,
+      favoriteCollectionIds: ['favorite-a'],
+    });
+  });
+});
 
 describe('favorite collection deletion', () => {
   const collectionA = {
