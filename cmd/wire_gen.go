@@ -110,6 +110,10 @@ import (
 	"github.com/segmentfault/pacman/log"
 )
 
+import (
+	_ "github.com/apache/answer/internal/plugin/s3_storage"
+)
+
 // Injectors from wire.go:
 
 // initApplication init application.

@@ -338,7 +338,8 @@ const VideoGenerationWorkspace: FC<IProps> = ({
   const [preset, setPreset] = useState('normal');
   const [referenceImages, setReferenceImages] = useState<ReferenceImage[]>([]);
   const [tasks, setTasks] = useState<VideoTask[]>([]);
-  const [taskSearch, setTaskSearch] = useState('');
+  const [sidebarTaskSearch, setSidebarTaskSearch] = useState('');
+  const [mobileTaskSearch, setMobileTaskSearch] = useState('');
   const [activeTaskID, setActiveTaskID] = useState('');
   const [error, setError] = useState('');
   const [actionNotice, setActionNotice] = useState('');
@@ -384,29 +385,32 @@ const VideoGenerationWorkspace: FC<IProps> = ({
     () => tasks.map((task) => task.videoURL).join('|'),
     [tasks],
   );
-  const filteredTasks = useMemo(() => {
-    const query = taskSearch.trim().toLocaleLowerCase();
-    if (!query) {
-      return tasks;
-    }
-    return tasks.filter((task) =>
-      [
-        task.prompt,
-        task.model,
-        task.siteModelID,
-        task.size,
-        task.ratio,
-        task.quality,
-        `${task.seconds} 秒`,
-        getTaskStatusLabel(task.status),
-        task.error || '',
-      ]
-        .filter(Boolean)
-        .join('\n')
-        .toLocaleLowerCase()
-        .includes(query),
-    );
-  }, [taskSearch, tasks]);
+  const getFilteredTasks = useCallback(
+    (search: string) => {
+      const query = search.trim().toLocaleLowerCase();
+      if (!query) {
+        return tasks;
+      }
+      return tasks.filter((task) =>
+        [
+          task.prompt,
+          task.model,
+          task.siteModelID,
+          task.size,
+          task.ratio,
+          task.quality,
+          `${task.seconds} 秒`,
+          getTaskStatusLabel(task.status),
+          task.error || '',
+        ]
+          .filter(Boolean)
+          .join('\n')
+          .toLocaleLowerCase()
+          .includes(query),
+      );
+    },
+    [tasks],
+  );
 
   const refreshVideoGenerations = useCallback(async () => {
     const resp = await getAiVideoGenerations();
@@ -867,55 +871,91 @@ const VideoGenerationWorkspace: FC<IProps> = ({
     </div>
   );
 
-  const renderTaskPanel = (closePanel = false, showRetry = true) => (
-    <div className="hcai-task-panel hcai-video-task-panel">
-      <div className="hcai-task-head">
-        <span>任务队列</span>
-        <strong>{tasks.length}</strong>
+  const renderTaskPanel = ({
+    closePanel = false,
+    showRetry = true,
+    search,
+    onSearchChange,
+  }: {
+    closePanel?: boolean;
+    showRetry?: boolean;
+    search?: string;
+    onSearchChange?: (value: string) => void;
+  }) => {
+    const canSearch = search !== undefined && onSearchChange !== undefined;
+    const panelTasks = canSearch ? getFilteredTasks(search) : tasks;
+    const trimmedSearch = canSearch ? search.trim() : '';
+    return (
+      <div className="hcai-task-panel hcai-video-task-panel">
+        <div className="hcai-task-head">
+          <span>任务队列</span>
+          <strong>
+            {trimmedSearch
+              ? `${panelTasks.length}/${tasks.length}`
+              : tasks.length}
+          </strong>
+        </div>
+        {canSearch ? (
+          <div className="hcai-agent-conversation-search-wrap">
+            <svg
+              aria-hidden="true"
+              className="hcai-agent-conversation-search-icon"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+              />
+            </svg>
+            <input
+              type="search"
+              value={search}
+              onChange={(event) => onSearchChange(event.target.value)}
+              placeholder="搜索任务..."
+              className="hcai-agent-conversation-search"
+            />
+          </div>
+        ) : null}
+        <div className="hcai-task-list">
+          {panelTasks.length > 0 ? (
+            panelTasks.map((task) =>
+              renderTaskItem(task, closePanel, showRetry),
+            )
+          ) : (
+            <span className="hcai-task-empty">
+              {tasks.length > 0 ? '没有匹配的任务' : '暂无任务'}
+            </span>
+          )}
+        </div>
       </div>
-      <div className="hcai-agent-conversation-search-wrap">
-        <svg
-          aria-hidden="true"
-          className="hcai-agent-conversation-search-icon"
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24">
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={2}
-            d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-          />
-        </svg>
-        <input
-          type="search"
-          value={taskSearch}
-          onChange={(event) => setTaskSearch(event.target.value)}
-          placeholder="搜索任务..."
-          className="hcai-agent-conversation-search"
-        />
-      </div>
-      <div className="hcai-task-list">
-        {filteredTasks.length > 0 ? (
-          filteredTasks.map((task) =>
-            renderTaskItem(task, closePanel, showRetry),
-          )
-        ) : (
-          <span className="hcai-task-empty">
-            {tasks.length > 0 ? '没有匹配的任务' : '暂无任务'}
-          </span>
-        )}
-      </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="hcai-image-workspace hcai-video-workspace">
       {sidebarTaskPortalHost
-        ? createPortal(renderTaskPanel(false, false), sidebarTaskPortalHost)
+        ? createPortal(
+            renderTaskPanel({
+              closePanel: false,
+              showRetry: false,
+              search: sidebarTaskSearch,
+              onSearchChange: setSidebarTaskSearch,
+            }),
+            sidebarTaskPortalHost,
+          )
         : null}
       {mobileSideNavTaskPortalHost
-        ? createPortal(renderTaskPanel(true), mobileSideNavTaskPortalHost)
+        ? createPortal(
+            renderTaskPanel({
+              closePanel: true,
+              search: mobileTaskSearch,
+              onSearchChange: setMobileTaskSearch,
+            }),
+            mobileSideNavTaskPortalHost,
+          )
         : null}
       <section className="hcai-image-composer">
         <div className="hcai-image-head">
@@ -1211,7 +1251,7 @@ const VideoGenerationWorkspace: FC<IProps> = ({
           )}
         </div>
 
-        {renderTaskPanel()}
+        {renderTaskPanel({})}
       </section>
       {previewVideo ? (
         <div
