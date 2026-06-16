@@ -75,11 +75,14 @@ export default function TaskCard({
   const [swipeActionActive, setSwipeActionActive] = useState(false);
   const [swipeDirection, setSwipeDirection] = useState<-1 | 0 | 1>(0);
   const [streamPreviewLoaded, setStreamPreviewLoaded] = useState(false);
+  const [coverShouldLoad, setCoverShouldLoad] = useState(false);
   const toggleTaskSelection = useStore((s) => s.toggleTaskSelection);
   const openFavoritePicker = useStore((s) => s.openFavoritePicker);
   const persistedStreamPreviewSrc =
     task.streamPartialImageUrls?.filter(Boolean).slice(-1)[0] || '';
-  const streamPreviewSrc = useStore((s) => s.streamPreviews[task.id] || '') || persistedStreamPreviewSrc;
+  const streamPreviewSrc =
+    useStore((s) => s.streamPreviews[task.id] || '') ||
+    persistedStreamPreviewSrc;
   const isWaitingForStreamPreview =
     task.status === 'running' && (task.streamPartialImages || 0) > 0;
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -92,6 +95,27 @@ export default function TaskCard({
   const swipeOffsetRef = useRef(0);
   const pendingSwipeOffsetRef = useRef(0);
   const swipeFrameRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setCoverShouldLoad(false);
+    const element = cardRef.current;
+    if (!element || typeof IntersectionObserver === 'undefined') {
+      setCoverShouldLoad(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry?.isIntersecting) return;
+        setCoverShouldLoad(true);
+        observer.disconnect();
+      },
+      { rootMargin: '360px 0px' },
+    );
+    observer.observe(element);
+
+    return () => observer.disconnect();
+  }, [task.id]);
 
   const updateSwipeDirection = (nextDirection: -1 | 0 | 1) => {
     if (swipeDirectionRef.current === nextDirection) return;
@@ -276,6 +300,12 @@ export default function TaskCard({
     const imageId = task.outputImages?.[0];
     let unsubscribe: (() => void) | undefined;
 
+    if (task.status === 'done' && !coverShouldLoad) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
     if (remoteImageUrl) {
       setThumbSrc(remoteImageUrl);
       return () => {
@@ -312,7 +342,7 @@ export default function TaskCard({
       cancelled = true;
       unsubscribe?.();
     };
-  }, [task.outputImages, task.rawImageUrls]);
+  }, [coverShouldLoad, task.outputImages, task.rawImageUrls, task.status]);
 
   const duration = (() => {
     let seconds: number;
@@ -505,7 +535,9 @@ export default function TaskCard({
                     />
                   </svg>
                   <span className="text-xs text-gray-400 dark:text-gray-500">
-                    {isWaitingForStreamPreview ? '等待流式预览...' : '生成中...'}
+                    {isWaitingForStreamPreview
+                      ? '等待流式预览...'
+                      : '生成中...'}
                   </span>
                 </div>
               )}

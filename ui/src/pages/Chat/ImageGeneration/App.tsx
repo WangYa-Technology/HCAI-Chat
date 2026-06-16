@@ -136,13 +136,15 @@ export default function App({ embedded = false }: AppProps) {
 
     let cancelled = false;
     void (async () => {
-      await ensureImageGenerationInitialized();
+      const initPromise = ensureImageGenerationInitialized();
+      const historyPromise = loadSystemImageGenerations();
+      await initPromise;
       const pendingPrompt = consumePendingImagePrompt();
       if (!cancelled && pendingPrompt) {
         setAppMode('gallery');
         setPrompt(pendingPrompt);
       }
-      if (!cancelled) await loadSystemImageGenerations();
+      if (!cancelled) await historyPromise;
     })();
     void loadSystemImageModels();
 
@@ -180,7 +182,7 @@ export default function App({ embedded = false }: AppProps) {
     let cancelled = false;
     const refreshGenerations = () => {
       if (cancelled || document.visibilityState === 'hidden') return;
-      void loadSystemImageGenerations();
+      void loadSystemImageGenerations({ silent: true });
     };
 
     const intervalId = window.setInterval(refreshGenerations, 3000);
