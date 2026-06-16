@@ -114,8 +114,17 @@ func TestNormalizeVideoStatus(t *testing.T) {
 	if got := normalizeVideoStatus(entity.AIVideoStatusCompleted); got != entity.AIVideoStatusCompleted {
 		t.Fatalf("completed status = %s", got)
 	}
+	if got := normalizeVideoStatus("succeeded"); got != entity.AIVideoStatusCompleted {
+		t.Fatalf("succeeded status = %s, want %s", got, entity.AIVideoStatusCompleted)
+	}
+	if got := normalizeVideoStatus("Completed"); got != entity.AIVideoStatusCompleted {
+		t.Fatalf("Completed status = %s, want %s", got, entity.AIVideoStatusCompleted)
+	}
 	if got := normalizeVideoStatus("processing"); got != entity.AIVideoStatusInProgress {
 		t.Fatalf("processing status = %s, want %s", got, entity.AIVideoStatusInProgress)
+	}
+	if got := normalizeVideoStatus("failed"); got != entity.AIVideoStatusFailed {
+		t.Fatalf("failed status = %s, want %s", got, entity.AIVideoStatusFailed)
 	}
 }
 
@@ -161,6 +170,23 @@ func TestDownloadImageRejectsNonImageResponse(t *testing.T) {
 	_, _, err := downloadImage(context.Background(), server.URL, imageDownloadOptions{})
 	if err == nil || !strings.Contains(err.Error(), "not an image") {
 		t.Fatalf("err = %v, want non-image error", err)
+	}
+}
+
+func TestNormalizeUpstreamVideoURLAcceptsHTTPURL(t *testing.T) {
+	got, err := normalizeUpstreamVideoURL(" https://cdn.example/video.mp4 ")
+	if err != nil {
+		t.Fatalf("normalizeUpstreamVideoURL err = %v", err)
+	}
+	if got != "https://cdn.example/video.mp4" {
+		t.Fatalf("url = %s", got)
+	}
+}
+
+func TestNormalizeUpstreamVideoURLRejectsUnsupportedScheme(t *testing.T) {
+	_, err := normalizeUpstreamVideoURL("javascript:alert(1)")
+	if err == nil || !strings.Contains(err.Error(), "scheme") {
+		t.Fatalf("err = %v, want scheme error", err)
 	}
 }
 

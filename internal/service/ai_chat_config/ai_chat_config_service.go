@@ -4173,7 +4173,10 @@ func (s *aiChatConfigService) waitAndSaveUpstreamVideo(ctx context.Context, prov
 		var status struct {
 			Status   string `json:"status"`
 			Progress int    `json:"progress"`
-			Error    struct {
+			Video    struct {
+				URL string `json:"url"`
+			} `json:"video"`
+			Error struct {
 				Message string `json:"message"`
 			} `json:"error"`
 		}
@@ -4184,12 +4187,12 @@ func (s *aiChatConfigService) waitAndSaveUpstreamVideo(ctx context.Context, prov
 		progress := max(1, min(99, status.Progress))
 		normalizedStatus := normalizeVideoStatus(status.Status)
 		recordStatus := normalizedStatus
-		if status.Status == entity.AIVideoStatusCompleted {
+		if normalizedStatus == entity.AIVideoStatusCompleted {
 			recordStatus = entity.AIVideoStatusInProgress
 			progress = 99
 		}
 		if normalizedStatus != lastStatus || progress != lastProgress {
-			log.Infof("ai video upstream status generation_id=%s upstream_id=%s status=%s progress=%d", generationID, upstreamID, normalizedStatus, progress)
+			log.Infof("ai video upstream status generation_id=%s upstream_id=%s status=%s upstream_status=%s progress=%d", generationID, upstreamID, normalizedStatus, status.Status, progress)
 			lastStatus = normalizedStatus
 			lastProgress = progress
 		}
@@ -4199,7 +4202,16 @@ func (s *aiChatConfigService) waitAndSaveUpstreamVideo(ctx context.Context, prov
 		}, "status", "progress"); err != nil {
 			log.Errorf("ai video progress update failed generation_id=%s upstream_id=%s status=%s progress=%d error=%v", generationID, upstreamID, recordStatus, progress, err)
 		}
-		if status.Status == entity.AIVideoStatusCompleted {
+		if normalizedStatus == entity.AIVideoStatusCompleted {
+			videoURL, err := normalizeUpstreamVideoURL(status.Video.URL)
+			if err != nil {
+				log.Errorf("ai video response url invalid generation_id=%s upstream_id=%s url=%s error=%v", generationID, upstreamID, status.Video.URL, err)
+				return "", err
+			}
+			if videoURL != "" {
+				log.Infof("ai video using upstream response url generation_id=%s upstream_id=%s video_url=%s", generationID, upstreamID, videoURL)
+				return videoURL, nil
+			}
 			raw, err := s.downloadUpstreamVideo(ctx, provider, upstreamID)
 			if err != nil {
 				log.Errorf("ai video download failed generation_id=%s upstream_id=%s error=%v", generationID, upstreamID, err)
@@ -4207,7 +4219,7 @@ func (s *aiChatConfigService) waitAndSaveUpstreamVideo(ctx context.Context, prov
 			}
 			return s.saveGeneratedVideo(userID, generationID, raw)
 		}
-		if status.Status == entity.AIVideoStatusFailed {
+		if normalizedStatus == entity.AIVideoStatusFailed {
 			if status.Error.Message != "" {
 				return "", fmt.Errorf("%s", status.Error.Message)
 			}
@@ -5603,12 +5615,42 @@ func videoAspectRatio(size string) string {
 }
 
 func normalizeVideoStatus(status string) string {
-	switch strings.TrimSpace(status) {
-	case entity.AIVideoStatusQueued, entity.AIVideoStatusInProgress, entity.AIVideoStatusCompleted, entity.AIVideoStatusFailed:
-		return status
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case entity.AIVideoStatusQueued:
+		return entity.AIVideoStatusQueued
+	case entity.AIVideoStatusInProgress:
+		return entity.AIVideoStatusInProgress
+	case entity.AIVideoStatusCompleted:
+		return entity.AIVideoStatusCompleted
+	case entity.AIVideoStatusFailed:
+		return entity.AIVideoStatusFailed
+	case "processing", "running", "pending":
+		return entity.AIVideoStatusInProgress
+	case "complete", "success", "succeeded", "done", "finished":
+		return entity.AIVideoStatusCompleted
+	case "error", "failure", "cancelled", "canceled":
+		return entity.AIVideoStatusFailed
 	default:
 		return entity.AIVideoStatusInProgress
 	}
+}
+
+func normalizeUpstreamVideoURL(rawURL string) (string, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("video url scheme is not supported")
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return "", fmt.Errorf("video url host is empty")
+	}
+	return parsed.String(), nil
 }
 
 func prepareReferenceImages(ctx context.Context, rawImages []string, opts referenceImageOptions) ([]*preparedReferenceImage, error) {

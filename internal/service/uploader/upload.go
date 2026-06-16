@@ -107,6 +107,7 @@ func (us *uploaderService) UploadAvatarFile(ctx *gin.Context, userID string) (ur
 		return "", err
 	}
 	if len(url) > 0 {
+		us.addPluginFileRecord(ctx, userID, url, string(plugin.UserAvatar), constant.AvatarSubPath)
 		return url, nil
 	}
 
@@ -388,6 +389,46 @@ func (us *uploaderService) tryToUploadByPlugin(ctx *gin.Context, source plugin.U
 		return nil
 	})
 	return url, err
+}
+
+func (us *uploaderService) addPluginFileRecord(ctx *gin.Context, userID, fileURL, source, subPath string) {
+	filePath := pluginFilePathFromURL(fileURL, subPath)
+	if filePath == "" {
+		log.Warnf("skip plugin file record, cannot resolve file path source=%s url=%s", source, fileURL)
+		return
+	}
+	us.fileRecordService.AddFileRecord(ctx, userID, filePath, fileURL, source)
+}
+
+func pluginFilePathFromURL(fileURL, subPath string) string {
+	parsed, err := url.Parse(strings.TrimSpace(fileURL))
+	if err != nil {
+		return ""
+	}
+	cleanSubPath := strings.Trim(strings.TrimSpace(subPath), "/")
+	if cleanSubPath == "" {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
+	for index, part := range parts {
+		unescapedPart, err := url.PathUnescape(part)
+		if err != nil {
+			return ""
+		}
+		if unescapedPart != cleanSubPath {
+			continue
+		}
+		unescapedParts := make([]string, 0, len(parts)-index)
+		for _, restPart := range parts[index:] {
+			unescapedRestPart, err := url.PathUnescape(restPart)
+			if err != nil {
+				return ""
+			}
+			unescapedParts = append(unescapedParts, unescapedRestPart)
+		}
+		return path.Clean(path.Join(unescapedParts...))
+	}
+	return ""
 }
 
 // removeExif remove exif
